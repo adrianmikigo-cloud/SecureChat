@@ -1,46 +1,108 @@
+// backend/index.js
 const express = require('express');
+const cors = require('cors');
 const http = require('http');
-const socketIo = require('socket.io');
+const SocketIO = require('socket.io');
+const { Sequelize, DataTypes } = require('sequelize');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 
 const app = express();
 const server = http.createServer(app);
-const io = socketIo(server);
+const io = SocketIO(server);
+app.use(cors());
+app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
-
-// Store connected users
-let users = {};
-
-// Generate a random key
-function generateKey() {
-    return crypto.randomBytes(32).toString('hex');
-}
-
-app.get('/', (req, res) => {
-    res.send('E2E Encrypted Chat Server is running.')
+// Sequelize database connection
+const sequelize = new Sequelize('SecureChatDB', 'user', 'password', {
+    host: 'localhost',
+    dialect: 'mysql',
 });
 
+// Sequelize models
+const User = sequelize.define('User', {
+    username: {
+        type: DataTypes.STRING,
+        unique: true,
+    },
+    password: {
+        type: DataTypes.STRING,
+    },
+});
+
+const Message = sequelize.define('Message', {
+    content: {
+        type: DataTypes.TEXT,
+    },
+    senderId: {
+        type: DataTypes.INTEGER,
+    },
+});
+
+const Permission = sequelize.define('Permission', {
+    userId: {
+        type: DataTypes.INTEGER,
+    },
+    canSendMessages: {
+        type: DataTypes.BOOLEAN,
+    },
+});
+
+// Authentication function
+const authenticateToken = (req, res, next) => {
+    const token = req.headers['authorization'];
+    if (!token) return res.sendStatus(401);
+    jwt.verify(token, 'your_jwt_secret', (err, user) => {
+        if (err) return res.sendStatus(403);
+        req.user = user;
+        next();
+    });
+};
+
+// Password hashing
+app.post('/register', async (req, res) => {
+    const hashedPassword = await bcrypt.hash(req.body.password, 10);
+    const user = await User.create({ username: req.body.username, password: hashedPassword });
+    res.status(201).json(user);
+});
+
+app.post('/login', async (req, res) => {
+    const user = await User.findOne({ where: { username: req.body.username } });
+    if (!user) return res.sendStatus(404);
+
+    const isValidPassword = await bcrypt.compare(req.body.password, user.password);
+    if (!isValidPassword) return res.sendStatus(403);
+
+    const accessToken = jwt.sign({ username: user.username }, 'your_jwt_secret', { expiresIn: '1h' });
+    res.json({ accessToken });
+});
+
+// E2E Encryption support
+const encryptMessage = (message) => {
+    const iv = crypto.randomBytes(16);
+    const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from('your_encryption_key'), iv);
+    let encrypted = cipher.update(message);
+    encrypted = Buffer.concat([encrypted, cipher.final()]);
+    return iv.toString('hex') + ':' + encrypted.toString('hex');
+};
+
+// Socket.io for real-time messaging
 io.on('connection', (socket) => {
-    console.log('A user connected');
-
-    socket.on('register', (username) => {
-        users[socket.id] = username;
-        socket.emit('key', generateKey());
-        console.log(`${username} has connected`);
-    });
-
-    socket.on('sendMessage', (data) => {
-        console.log(`Message from ${data.username}: ${data.message}`);
-        socket.broadcast.emit('receiveMessage', data);
-    });
-
-    socket.on('disconnect', () => {
-        console.log(`User ${users[socket.id]} disconnected`);
-        delete users[socket.id];
+    console.log('New client connected');
+    socket.on('sendMessage', (msg) => {
+        const encryptedMsg = encryptMessage(msg.content);
+        // Store encrypted message in the database
+        Message.create({ content: encryptedMsg, senderId: msg.senderId });
+        socket.broadcast.emit('message', msg);
     });
 });
 
+// Start server
+const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Server listening on port ${PORT}`);
+    console.log(`Server running on port ${PORT}`);
 });
+
+// Sync models
+sequelize.sync();
