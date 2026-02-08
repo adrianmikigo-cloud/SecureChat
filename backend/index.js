@@ -1,108 +1,48 @@
-// backend/index.js
+'use strict';
+
 const express = require('express');
-const cors = require('cors');
 const http = require('http');
-const SocketIO = require('socket.io');
-const { Sequelize, DataTypes } = require('sequelize');
-const jwt = require('jsonwebtoken');
-const bcrypt = require('bcrypt');
+const socketIo = require('socket.io');
 const crypto = require('crypto');
 
+// Create Express app
 const app = express();
 const server = http.createServer(app);
-const io = SocketIO(server);
-app.use(cors());
-app.use(express.json());
+const io = socketIo(server);
 
-// Sequelize database connection
-const sequelize = new Sequelize('SecureChatDB', 'user', 'password', {
-    host: 'localhost',
-    dialect: 'mysql',
-});
+const PORT = process.env.PORT || 3000;
 
-// Sequelize models
-const User = sequelize.define('User', {
-    username: {
-        type: DataTypes.STRING,
-        unique: true,
-    },
-    password: {
-        type: DataTypes.STRING,
-    },
-});
-
-const Message = sequelize.define('Message', {
-    content: {
-        type: DataTypes.TEXT,
-    },
-    senderId: {
-        type: DataTypes.INTEGER,
-    },
-});
-
-const Permission = sequelize.define('Permission', {
-    userId: {
-        type: DataTypes.INTEGER,
-    },
-    canSendMessages: {
-        type: DataTypes.BOOLEAN,
-    },
-});
-
-// Authentication function
-const authenticateToken = (req, res, next) => {
-    const token = req.headers['authorization'];
-    if (!token) return res.sendStatus(401);
-    jwt.verify(token, 'your_jwt_secret', (err, user) => {
-        if (err) return res.sendStatus(403);
-        req.user = user;
-        next();
-    });
+// Encrypt messages
+const encrypt = (text) => {
+    const cipher = crypto.createCipher('aes-256-cbc', 'a_password');
+    let encrypted = cipher.update(text, 'utf8', 'hex');
+    encrypted += cipher.final('hex');
+    return encrypted;
 };
 
-// Password hashing
-app.post('/register', async (req, res) => {
-    const hashedPassword = await bcrypt.hash(req.body.password, 10);
-    const user = await User.create({ username: req.body.username, password: hashedPassword });
-    res.status(201).json(user);
-});
-
-app.post('/login', async (req, res) => {
-    const user = await User.findOne({ where: { username: req.body.username } });
-    if (!user) return res.sendStatus(404);
-
-    const isValidPassword = await bcrypt.compare(req.body.password, user.password);
-    if (!isValidPassword) return res.sendStatus(403);
-
-    const accessToken = jwt.sign({ username: user.username }, 'your_jwt_secret', { expiresIn: '1h' });
-    res.json({ accessToken });
-});
-
-// E2E Encryption support
-const encryptMessage = (message) => {
-    const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from('your_encryption_key'), iv);
-    let encrypted = cipher.update(message);
-    encrypted = Buffer.concat([encrypted, cipher.final()]);
-    return iv.toString('hex') + ':' + encrypted.toString('hex');
+// Decrypt messages
+const decrypt = (encryptedText) => {
+    const decipher = crypto.createDecipher('aes-256-cbc', 'a_password');
+    let decrypted = decipher.update(encryptedText, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return decrypted;
 };
 
-// Socket.io for real-time messaging
+// Socket.io connection
 io.on('connection', (socket) => {
     console.log('New client connected');
-    socket.on('sendMessage', (msg) => {
-        const encryptedMsg = encryptMessage(msg.content);
-        // Store encrypted message in the database
-        Message.create({ content: encryptedMsg, senderId: msg.senderId });
-        socket.broadcast.emit('message', msg);
+    
+    socket.on('sendMessage', (message) => {
+        const encryptedMessage = encrypt(message);
+        io.emit('receiveMessage', encryptedMessage);
+    });
+
+    socket.on('disconnect', () => {
+        console.log('Client disconnected');
     });
 });
 
-// Start server
-const PORT = process.env.PORT || 3000;
+// Start the server
 server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
-
-// Sync models
-sequelize.sync();
